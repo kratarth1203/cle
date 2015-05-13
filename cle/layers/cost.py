@@ -203,3 +203,101 @@ class GMMLayer(GaussianLayer):
                                          dtype=mu.dtype)
         z = mu + sig * epsilon
         return z, mu
+
+class biGMMLayer(GaussianLayer):
+    """
+    Gaussian mixture model layer
+
+    Parameters
+    ----------
+    .. todo::
+    """
+    def cost(self, X):
+        if len(X) != 6:
+            raise ValueError("The number of inputs does not match.")
+        cost = GMM(X[0], X[1], X[2], X[3])
+        if self.use_sum:
+            return cost.sum()
+        else:
+            return cost.mean()
+
+    def sample(self, X):
+        mu = X[0]
+        sig = X[1]
+        coeff = X[2]
+        corr = X[3]
+        binary = X[4]
+        mu = mu.reshape((mu.shape[0],
+                         mu.shape[1]/coeff.shape[-1],
+                         coeff.shape[-1]))
+        sig = sig.reshape((sig.shape[0],
+                           sig.shape[1]/coeff.shape[-1],
+                           coeff.shape[-1]))
+        idx = predict(
+            self.theano_rng.multinomial(
+                pvals=coeff,
+                dtype=coeff.dtype
+            ),
+            axis=1
+        )
+        mu = mu[T.arange(mu.shape[0]), :, idx]
+        sig = sig[T.arange(sig.shape[0]), :, idx]
+        corr = corr[T.arange(corr.shape[0]), idx]
+        
+        mu_x = mu[:,0]
+        mu_y = mu[:,1]
+        sig_x = sig[:,0]
+        sig_y = sig[:,1]
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                                         avg=0., std=1.,
+                                         dtype=mu.dtype)
+        s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
+        s_y = mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) ).dimshuffle(0,'x')
+        s = T.concatenate([binary,s_x,s_y], axis = 1)
+        return s
+
+    def argmax_mean(self, X):
+        mu = X[0]
+        coeff = X[1]
+        mu = mu.reshape((mu.shape[0],
+                         mu.shape[1]/coeff.shape[-1],
+                         coeff.shape[-1]))
+        idx = predict(coeff)
+        mu = mu[T.arange(mu.shape[0]), :, idx]
+        return mu
+
+    def sample_mean(self, X):
+        mu = X[0]
+        sig = X[1]
+        coeff = X[2]
+        corr = X[3]
+        binary = X[4]
+        mu = mu.reshape((mu.shape[0],
+                         mu.shape[1]/coeff.shape[-1],
+                         coeff.shape[-1]))
+        sig = sig.reshape((sig.shape[0],
+                           sig.shape[1]/coeff.shape[-1],
+                           coeff.shape[-1]))
+        idx = predict(
+            self.theano_rng.multinomial(
+                pvals=coeff,
+                dtype=coeff.dtype
+            ),
+            axis=1
+        )
+        mu = mu[T.arange(mu.shape[0]), :, idx]
+        sig = sig[T.arange(sig.shape[0]), :, idx]
+        corr = corr[T.arange(corr.shape[0]), idx].dimshuffle(0,'x')
+        mu_x = mu[:,0]
+        mu_y = mu[:,1]
+        sig_x = sig[:,0]
+        sig_y = sig[:,1]
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                                         avg=0., std=1.,
+                                         dtype=mu.dtype)
+        s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
+        s_y = mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) ).dimshuffle(0,'x')
+        s = T.concatenate([binary,s_x,s_y], axis = 1)
+        return s, mu
