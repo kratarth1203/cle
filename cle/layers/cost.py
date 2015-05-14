@@ -255,6 +255,7 @@ class biGMMLayer(GaussianLayer):
         s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
         s_y = mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) ).dimshuffle(0,'x')
         s = T.concatenate([binary,s_x,s_y], axis = 1)
+        ipdb.set_trace()
         return s
 
     def argmax_mean(self, X):
@@ -288,16 +289,18 @@ class biGMMLayer(GaussianLayer):
         )
         mu = mu[T.arange(mu.shape[0]), :, idx]
         sig = sig[T.arange(sig.shape[0]), :, idx]
-        corr = corr[T.arange(corr.shape[0]), idx].dimshuffle(0,'x')
+        corr = corr[T.arange(corr.shape[0]), idx]
+        
         mu_x = mu[:,0]
         mu_y = mu[:,1]
         sig_x = sig[:,0]
         sig_y = sig[:,1]
      
         z = self.theano_rng.normal(size=mu.shape,
-                                         avg=0., std=1.,
-                                         dtype=mu.dtype)
+                   avg=0., std=1.,
+                   dtype=mu.dtype)
         s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
-        s_y = mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) ).dimshuffle(0,'x')
-        s = T.concatenate([binary,s_x,s_y], axis = 1)
-        return s, mu
+        s_y = (mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) )).dimshuffle(0,'x')
+        s_t = T.concatenate([binary,s_x,s_y], axis = 1)
+        
+        return s_t, mu
