@@ -225,8 +225,8 @@ class biGaussLayer(GaussianLayer):
     def sample(self, X):
         mu = X[0]
         sig = X[1]
-        corr = X[3]
-        binary = X[4]
+        corr = X[2]
+        binary = X[3]
         
         mu_x = mu[:,0]
         mu_y = mu[:,1]
@@ -244,13 +244,13 @@ class biGaussLayer(GaussianLayer):
     def sample_mean(self, X):
         mu = X[0]
         sig = X[1]
-        corr = X[3]
-        binary = X[4]
+        corr = X[2].reshape((X[2].shape[0],))
+        binary = X[3]
         
-        mu_x = mu[:,0]
-        mu_y = mu[:,1]
-        sig_x = sig[:,0]
-        sig_y = sig[:,1]
+        mu_x = mu[:,0].reshape((mu[:,0].shape[0],))
+        mu_y = mu[:,1].reshape((mu[:,1].shape[0],))
+        sig_x = sig[:,0].reshape((sig[:,0].shape[0],))
+        sig_y = sig[:,1].reshape((sig[:,1].shape[0],))
      
         z = self.theano_rng.normal(size=mu.shape,
                    avg=0., std=1.,
