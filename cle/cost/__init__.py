@@ -102,7 +102,7 @@ def biGauss(y, mu, sig, corr, binary):
     y0 = y[:,0].reshape((-1,1))
     y1 = y[:,1].reshape((-1,1))
     y2 = y[:,2].reshape((-1,1))
-
+    corr = corr.reshape((-1,1))
     c_b =  T.sum( T.xlogx.xlogy0(y0, binary) +
               T.xlogx.xlogy0(1 - y0, 1 - binary), axis = 1)
 

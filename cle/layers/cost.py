@@ -414,3 +414,36 @@ class biGMMLayer(GaussianLayer):
         s_t = T.concatenate([binary,s_x,s_y], axis = 1)
         
         return s_t, T.sum(coeff.dimshuffle(0,'x',1) * mu, axis = -1)
+    
+    def sample_all_mean_biased(self, X):
+        mu = X[0]
+        sig = X[1]
+        coeff = X[2]
+        corr = X[3]
+        binary = X[4]
+        bias = X[5]
+        mu = mu.reshape((mu.shape[0],
+                         mu.shape[1]/coeff.shape[-1],
+                         coeff.shape[-1]))
+        sig = sig.reshape((sig.shape[0],
+                           sig.shape[1]/coeff.shape[-1],
+                           coeff.shape[-1]))
+        sig = T.log(T.exp(sig) -1. ) - bias
+        sig = T.nnet.softplus(sig)
+        
+        mu_x = mu[:,0,:]
+        mu_y = mu[:,1,:]
+        sig_x = sig[:,0,:]
+        sig_y = sig[:,1,:]
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                   avg=0., std=1.,
+                   dtype=mu.dtype)
+        
+        z_x = z[:,0,:]
+        z_y = z[:,1,:]
+        s_x = T.sum(coeff * (mu_x + sig_x * z_x), axis = -1).dimshuffle(0,'x')
+        s_y = T.sum(coeff * (mu_y + sig_y * ( (z_x * corr) + (z_y * T.sqrt(1.-corr**2) ) )), axis = -1).dimshuffle(0,'x')
+        s_t = T.concatenate([binary,s_x,s_y], axis = 1)
+        
+        return s_t, T.sum(coeff.dimshuffle(0,'x',1) * mu, axis = -1)

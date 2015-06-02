@@ -27,3 +27,27 @@ class FullyConnectedLayer(StemCell):
         z = self.nonlin(z) + self.cons
         z.name = self.name
         return z
+
+class FullyConnectedLayer2(StemCell):
+    """
+    Fully connected layer
+
+    Parameters
+    ----------
+    .. todo::
+    """
+    def fprop(self, X, c):
+        if len(X) != len(self.parent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of parents.")
+        # X could be a list of inputs.
+        # depending the number of parents.
+        z = T.zeros((X[0].shape[0], self.nout))
+        for x, (parname, parout) in izip(X, self.parent.items()):
+            W = self.params['W_'+parname+'__'+self.name]
+            z += T.dot(x[:, :parout], W)
+        z += self.params['b_'+self.name]
+	z *= c
+        z = self.nonlin(z) + self.cons
+        z.name = self.name
+        return z
