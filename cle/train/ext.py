@@ -4,6 +4,7 @@ import logging
 import numpy as np
 import os
 import sys
+import theano
 import theano.tensor as T
 import time
 
@@ -51,7 +52,7 @@ class GradientClipping(Extension):
         """
         g_norm = 0.
         for p, g in grads.items():
-            g /= self.batch_size
+            g /= T.cast(self.batch_size, dtype=theano.config.floatX)
             grads[p] = g
             g_norm += (g**2).sum()
         not_finite = T.or_(T.isnan(g_norm), T.isinf(g_norm))
@@ -171,17 +172,20 @@ class Monitoring(Extension, TheanoMixin):
             logger.info("\t------------------")
             logger.info("\tForward-prop based")
             logger.info("\t..................")
-            optch = [out.name for out in mainloop.outputs]
-            for i, out in enumerate(optch):
-                this_mean = np.asarray(log._batches)[srt: end, i].mean()
-                if this_mean is np.nan:
-                    raise ValueError("NaN occured in output.")
-                logger.info("\t%s: %f" % (out, this_mean))
+            output_channel = [out.name for out in mainloop.outputs]
+            if log._batch_seen == 0:
+                logger.info("\tinitial_monitoring")
+            else:
+                for i, out in enumerate(output_channel):
+                    this_mean = np.asarray(log._batches)[srt: end, i].mean()
+                    if this_mean is np.nan:
+                        raise ValueError("NaN occured in output.")
+                    logger.info("\tthis_batch_%s: %f" % (out, this_mean))
             this_t0 = time.time()
             self.monitor_data_based_channels(mainloop)
             mt = time.time() - this_t0
             logger.info("\tElapsed time for monitoring: %f" % mt)
- 
+
 
 class Picklize(Extension):
     """
@@ -189,9 +193,10 @@ class Picklize(Extension):
 
         WRITEME
     """
-    def __init__(self, freq, path):
+    def __init__(self, freq, path, force_save_freq=1e15):
         self.name = 'ext_save'
         self.freq = freq
+        self.force_save_freq = force_save_freq
         if not os.path.exists(path):
             os.makedirs(path)
         self.path = path
@@ -201,11 +206,31 @@ class Picklize(Extension):
         Pickle the mainloop
         """
         if np.mod(mainloop.trainlog._batch_seen, self.freq) == 0:
-            pklpath = mainloop.name + '.pkl'
-            path = os.path.join(self.path, pklpath)
+            pkl_path = mainloop.name + '.pkl'
+            path = os.path.join(self.path, pkl_path)
             logger.info("\tSaving model to: %s" % path)
             try:
-                secure_pickle_dump(mainloop, path)
+                import sys
+                sys.setrecursionlimit(50000)
+                f = open(path, 'wb')
+                cPickle.dump(mainloop, f, -1)
+                f.close()
+                #secure_pickle_dump(mainloop, path)
+            except Exception:
+                raise
+        if np.mod(mainloop.trainlog._batch_seen, self.force_save_freq) == 0:
+            force_pkl_path = mainloop.name + '_' +\
+                             str(mainloop.trainlog._batch_seen) +\
+                             'updates.pkl'
+            force_path = os.path.join(self.path, force_pkl_path)
+            logger.info("\tSaving model to: %s" % force_path)
+            try:
+                import sys
+                sys.setrecursionlimit(50000)
+                f = open(force_path, 'wb')
+                cPickle.dump(mainloop, f, -1)
+                f.close()
+                #secure_pickle_dump(mainloop, path)
             except Exception:
                 raise
 
@@ -216,9 +241,10 @@ class EarlyStopping(Extension):
 
         WRITEME
     """
-    def __init__(self, path, freq=1):
+    def __init__(self, path, freq=1, force_save_freq=None):
         self.name = 'ext_save'
         self.freq = freq
+        self.force_save_freq = force_save_freq
         if not os.path.exists(path):
             os.makedirs(path)
         self.path = path
@@ -229,16 +255,39 @@ class EarlyStopping(Extension):
         Pickle the mainloop
         """
         if len(mainloop.trainlog._ddmonitors) > 0:
-            if np.mod(mainloop.trainlog._batch_seen, self.freq) == 0:
-                if mainloop.trainlog._ddmonitors[-1][0] < self.best:
+            if mainloop.trainlog._ddmonitors[-1][0] < self.best:
+                if np.mod(mainloop.trainlog._batch_seen, self.freq) == 0:
                     self.best = mainloop.trainlog._ddmonitors[-1][0]
-                    pklpath = mainloop.name + '_best.pkl'
-                    path = os.path.join(self.path, pklpath)
+                    pkl_path = mainloop.name + '_best.pkl'
+                    path = os.path.join(self.path, pkl_path)
                     logger.info("\tSaving best model to: %s" % path)
                     try:
-                        secure_pickle_dump(mainloop, path)
+                        import sys
+                        sys.setrecursionlimit(50000)
+                        f = open(path, 'wb')
+                        cPickle.dump(mainloop, f, -1)
+                        f.close()
+                        #secure_pickle_dump(mainloop, path)
                     except Exception:
                         raise
+                    if self.force_save_freq is not None:
+                        this_scaler = (mainloop.trainlog._batch_seen /
+                                      self.force_save_freq)
+                        this_number = self.force_save_freq * (this_scaler + 1)
+                        force_pkl_path = mainloop.name + '_best_before_' +\
+                                         str(this_number) +\
+                                         'updates.pkl'
+                        force_path = os.path.join(self.path, force_pkl_path)
+                        logger.info("\tSaving best model to: %s" % force_path)
+                        try:
+                            import sys
+                            sys.setrecursionlimit(50000)
+                            f = open(force_path, 'wb')
+                            cPickle.dump(mainloop, f, -1)
+                            f.close()
+                            #secure_pickle_dump(mainloop, path)
+                        except Exception:
+                            raise
 
 
 class WeightDecay(Extension):
