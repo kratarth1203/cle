@@ -205,6 +205,61 @@ class GMMLayer(GaussianLayer):
         return z, mu
 
 
+class biGaussSimpleLayer(GaussianLayer):
+    """
+    bivariate Gaussian
+
+    Parameters
+    ----------
+    .. todo::
+    """
+    def cost(self, X):
+        if len(X) != 5:
+            raise ValueError("The number of inputs does not match.")
+        cost = GMM(X[0], X[1], X[2], X[3])
+        if self.use_sum:
+            return cost.sum()
+        else:
+            return cost.mean()
+
+    def sample(self, X):
+        mu = X[0]
+        sig = X[1]
+        corr = X[2]
+        
+        mu_x = mu[:,0]
+        mu_y = mu[:,1]
+        sig_x = sig[:,0]
+        sig_y = sig[:,1]
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                                         avg=0., std=1.,
+                                         dtype=mu.dtype)
+        s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
+        s_y = mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) ).dimshuffle(0,'x')
+        s = T.concatenate([s_x,s_y], axis = 1)
+        return s
+
+    def sample_mean(self, X):
+        mu = X[0]
+        sig = X[1]
+        corr = X[2].reshape((X[2].shape[0],))
+        
+        mu_x = mu[:,0].reshape((mu[:,0].shape[0],))
+        mu_y = mu[:,1].reshape((mu[:,1].shape[0],))
+        sig_x = sig[:,0].reshape((sig[:,0].shape[0],))
+        sig_y = sig[:,1].reshape((sig[:,1].shape[0],))
+     
+        z = self.theano_rng.normal(size=mu.shape,
+                   avg=0., std=1.,
+                   dtype=mu.dtype)
+        s_x = (mu_x + sig_x * z[:,0]).dimshuffle(0,'x')
+        s_y = (mu_y + sig_y * ( (z[:,0] * corr) + (z[:,1] * T.sqrt(1.-corr**2) ) )).dimshuffle(0,'x')
+        s_t = T.concatenate([s_x,s_y], axis = 1)
+        
+        return s_t, mu
+
+
 class biGaussLayer(GaussianLayer):
     """
     bivariate Gaussian
