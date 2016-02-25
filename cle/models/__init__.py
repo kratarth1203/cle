@@ -1,13 +1,14 @@
 import ipdb
 import theano
 
-from collections import OrderedDict
 from cle.cle.utils import (
     flatten,
     tolist,
     topological_sort,
     PickleMixin
 )
+
+from collections import OrderedDict
 
 
 class Model(object):
@@ -18,29 +19,16 @@ class Model(object):
     ----------
     .. todo::
     """
-    def __init__(self, inputs=None, graphs=None, nodes=None, params=None, updates=None):
+    def __init__(self, inputs=None, nodes=None, params=None, updates=None):
         self.inputs = inputs
-        self.graphs = graphs
-        self._params = params
-        # used in manual mode
         self.nodes = nodes
+        self.params = params
         self.updates = OrderedDict()
         if updates is not None:
-            for update in updates:
-                self.updates[update] = update
-
-    @property
-    def params(self):
-        if getattr(self, '_params', None) is None:
-            self._params = self.get_params()
-        return self._params
-
-    def get_params(self):
-        params = []
-        for graph in tolist(self.graphs):
-            params += graph.params
-        return params
+            for update in updates.items():
+                self.updates[update[0]] = update[1]
 
     def set_updates(self, updates):
-        for update in updates:
-            self.updates[update] = update
+
+        for update in updates.items():
+            self.updates[update[0]] = update[1]

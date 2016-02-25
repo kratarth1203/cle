@@ -3,8 +3,8 @@ import numpy as np
 import theano
 import theano.tensor as T
 
-from cle.cle.data import Iterator
 from cle.cle.cost import NllBin
+from cle.cle.data import Iterator
 from cle.cle.models import Model
 from cle.cle.models.draw import (
     CanvasLayer,
@@ -29,13 +29,12 @@ from cle.cle.utils import flatten
 from cle.cle.utils.compat import OrderedDict
 from cle.datasets.mnist import MNIST
 
-
 datapath = '/home/junyoung/data/mnist/mnist_binarized_salakhutdinov.pkl'
 savepath = '/home/junyoung/repos/cle/saved/'
 
 batch_size = 100
-inpsz = 784
-latsz = 100
+input_dim = 784
+latent_dim = 100
 n_steps = 64
 debug = 0
 
@@ -86,7 +85,7 @@ enc = LSTM(name='enc',
 phi_mu = FullyConnectedLayer(name='phi_mu',
                              parent=['enc'],
                              parent_dim=[256],
-                             nout=latsz,
+                             nout=latent_dim,
                              unit='linear',
                              init_W=init_W,
                              init_b=init_b)
@@ -94,26 +93,26 @@ phi_mu = FullyConnectedLayer(name='phi_mu',
 phi_sig = FullyConnectedLayer(name='phi_sig',
                               parent=['enc'],
                               parent_dim=[256],
-                              nout=latsz,
+                              nout=latent_dim,
                               unit='softplus',
                               init_W=init_W,
                               init_b=init_b_sig)
 
 prior = PriorLayer(name='prior',
                    parent=['phi_mu', 'phi_sig'],
-                   parent_dim=[latsz, latsz],
+                   parent_dim=[latent_dim, latent_dim],
                    use_sample=1,
-                   nout=latsz)
+                   nout=latent_dim)
 
 kl = PriorLayer(name='kl',
                 parent=['phi_mu', 'phi_sig'],
-                parent_dim=[latsz, latsz],
+                parent_dim=[latent_dim, latent_dim],
                 use_sample=0,
-                nout=latsz)
+                nout=latent_dim)
 
 dec = LSTM(name='dec',
            parent=['prior'],
-           parent_dim=[latsz],
+           parent_dim=[latent_dim],
            batch_size=batch_size,
            nout=256,
            unit='tanh',
@@ -148,9 +147,11 @@ canvas = CanvasLayer(name='canvas',
                      batch_size=batch_size)
 
 nodes = [read_param, read, enc, phi_mu, phi_sig, prior, kl, dec, w, write_param, write, error, canvas]
+
 for node in nodes:
     node.initialize()
 params = flatten([node.get_params().values() for node in nodes])
+
 
 def inner_fn(enc_tm1, dec_tm1, canvas_tm1, x):
 
@@ -185,6 +186,7 @@ def inner_fn(enc_tm1, dec_tm1, canvas_tm1, x):
                               None],
                 non_sequences=[x],
                 n_steps=n_steps)
+
 for k, v in updates.iteritems():
     k.default_update = v
 
@@ -196,6 +198,7 @@ recon_term.name = 'recon_term'
 kl_term.name = 'kl_term'
 recon_err = ((x - T.nnet.sigmoid(canvas_out[-1]))**2).mean() / x.std()
 recon_err.name = 'recon_err'
+
 model.inputs = [x]
 model._params = params
 model.nodes = nodes

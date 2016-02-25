@@ -1,10 +1,11 @@
 import ipdb
 import theano.tensor as T
+import theano
 
 from cle.cle.layers import StemCell
 from cle.cle.utils import tolist, totuple, unpack
 from theano.tensor.nnet import conv2d
-
+from theano.compat.python2x import OrderedDict
 
 class Conv2DLayer(StemCell):
     """
@@ -37,7 +38,7 @@ class Conv2DLayer(StemCell):
              if len(parshape) != 0:
                 self.parent[par] = parshape[i]
            
-    def fprop(self, x):
+    def fprop(self, x, tparams = None):
         # Conv layer can have only one parent.
         # Later, we will extend to generalize this.
         # For now, we satisfy with fullyconnected layer
@@ -45,15 +46,16 @@ class Conv2DLayer(StemCell):
         # into same hidden space.
         x = unpack(x)
         parname, parshape = unpack(self.parent.items())
-        z = T.zeros(self.outshape)
         W = self.params['W_'+parname+'__'+self.name]
-        z += conv2d(
-            x, W,
-            image_shape=parshape,
+        
+        z = T.nnet.conv2d(
+            x.astype('float32'), W.astype('float32'),
             subsample=self.step_size,
-            border_mode=self.border_mode,
-            filter_shape=self.filtershape
-        )
+            border_mode=self.border_mode )
+        '''
+        z += conv2d(
+            x.astype('float32'), W.astype('float32'))
+        ''' 
         if self.tied_bias:
             z += self.params['b_'+self.name].dimshuffle('x', 0, 'x', 'x')
         else:
@@ -69,7 +71,7 @@ class Conv2DLayer(StemCell):
         batch_size = parshape[0]
         nchannels = parshape[1]
         if filtershape is not None:
-            nfilters = filtershape[1]
+            nfilters = filtershape[0]#1
             if self.border_mode == 'valid':
                 x = parshape[2] - filtershape[2] + 1
                 y = parshape[3] - filtershape[3] + 1
@@ -87,16 +89,17 @@ class Conv2DLayer(StemCell):
                 y = outshape[3] - parshape[3] + 1
             W_shape = (nfilters, nchannels, x, y)
             self.filtershape = W_shape
+
         W_name = 'W_'+parname+'__'+self.name
         self.alloc(self.init_W.get(self.filtershape, W_name))
         b_name = 'b_'+self.name
         if self.tied_bias:
             b_shape = nfilters
-            self.alloc(self.init_b.get(b_shape, b_name))
         else:
             b_shape = (nfilters, x, y)
-            self.alloc(self.init_b.get(b_shape, b_name))
+        self.alloc(self.init_b.get(b_shape, b_name))
 
+        return self.params
 
 class ConvertLayer(StemCell):
     """

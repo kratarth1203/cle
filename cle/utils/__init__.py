@@ -15,7 +15,6 @@ from theano.compat.python2x import OrderedDict
 
 
 logger = logging.getLogger(__name__)
-rng = np.random.RandomState((2015, 2, 19))
 
 
 def topological_sort(graph):
@@ -51,7 +50,7 @@ def topological_sort(graph):
 
 def one_hot(labels, nlabels=None):
     nlabels = np.max(labels) + 1 if nlabels is None else nlabels
-    code = np.zeros((len(labels), nlabels), dtype='float32')
+    code = np.zeros((len(labels), nlabels), dtype=theano.config.floatX)
     for i, j in enumerate(labels):
         code[i, j] = 1.
     return code
@@ -163,29 +162,13 @@ class PickleMixin(object):
             self._pickle_skip_list.append('updates')
             self._pickle_skip_list.append('optimizer')
             self._pickle_skip_list.append('endloop')
-            #for k, v in self.__dict__.items():
-            #    if k not in self._pickle_skip_list:
-            #        try:
-            #            f = tempfile.TemporaryFile()
-            #            cPickle.dump(v, f, protocol=-1)
-            #        except RuntimeError as e:
-            #            if str(e).find('recursion') != -1:
-            #                logger.warning('cle.utils.PickleMixin encountered '
-            #                   'the following error: ' + str(e) +
-            #                   '\nAttempting to resolve this error by calling ' +
-            #                   'sys.setrecusionlimit and retrying')
-            #                old_limit = sys.getrecursionlimit()
-            #            try:
-            #                sys.setrecursionlimit(50000)
-            #                cPickle.dump(v, f, protocol=-1)
-            #            finally:
-            #                sys.setrecursionlimit(old_limit)
+            self._pickle_skip_list.append('debug_print')
         state = OrderedDict()
         for k, v in self.__dict__.items():
             if k not in self._pickle_skip_list:
                 state[k] = v
         return state
- 
+
     def __setstate__(self, state):
         self.__dict__ = state
 
@@ -250,6 +233,57 @@ def initialize_from_pkl(arg, path):
     f.close()
 
 
+# push parameters to Theano shared variables
+def zipp(params, tparams):
+
+    for kk, vv in params.iteritems():
+        tparams[kk].set_value(vv)
+
+
+# pull parameters from Theano shared variables
+def unzip(zipped):
+
+    new_params = OrderedDict()
+    for kk, vv in zipped.iteritems():
+        new_params[kk] = vv.get_value()
+
+    return new_params
+
+
+# get the list of parameters: Note that tparams must be OrderedDict
+def itemlist(tparams):
+    return [vv for kk, vv in tparams.iteritems()]
+
+
+# initialize Theano shared variables according to the initial parameters
+def init_tparams(params):
+
+    tparams = OrderedDict()
+    for kk, pp in params.iteritems():
+        tparams[kk] = theano.shared(castX(params[kk]), name=kk)
+
+    return tparams
+
+
+# load parameters
+def load_params(path, params):
+
+    pp = numpy.load(path)
+    for kk, vv in params.iteritems():
+        if kk not in pp:
+            warnings.warn('%s is not in the archive' % kk)
+            continue
+        params[kk] = pp[kk]
+
+    return params
+
+
+class DefaultListOrderedDict(OrderedDict):
+    def __missing__(self,k):
+        self[k] = []
+        return self[k]
+
+
 def segment_axis(a, length, overlap=0, axis=None, end='cut', endvalue=0):
     """Generate a new array that chops the given array along the given axis
     into overlapping frames.
@@ -268,7 +302,7 @@ def segment_axis(a, length, overlap=0, axis=None, end='cut', endvalue=0):
         The axis to operate on; if None, act on the flattened array
     end : {'cut', 'wrap', 'end'}, optional
         What to do with the last frame, if the array is not evenly
-        divisible into pieces. 
+        divisible into pieces.
 
             - 'cut'   Simply discard the extra values
             - 'wrap'  Copy values from the beginning of the array

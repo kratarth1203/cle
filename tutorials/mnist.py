@@ -1,11 +1,10 @@
 import ipdb
 import numpy as np
 
+from cle.cle.cost import NllMulInd
 from cle.cle.data import Iterator
-from cle.cle.graph.net import Net
 from cle.cle.models import Model
-from cle.cle.layers import InitCell, OnehotLayer
-from cle.cle.layers.cost import MulCrossEntropyLayer
+from cle.cle.layers import InitCell
 from cle.cle.layers.feedforward import FullyConnectedLayer
 from cle.cle.train import Training
 from cle.cle.train.ext import (
@@ -16,93 +15,93 @@ from cle.cle.train.ext import (
     EarlyStopping
 )
 from cle.cle.train.opt import RMSProp
-from cle.cle.utils import error, predict, OrderedDict
+from cle.cle.utils import error, flatten, init_tparams, predict, OrderedDict
 from cle.datasets.mnist import MNIST
 
 
 # Set your dataset
-#data_path = '/data/lisa/data/mnist/mnist.pkl'
-#save_path = '/u/chungjun/repos/cle/saved/'
-data_path = '/home/junyoung/data/mnist/mnist.pkl'
-save_path = '/home/junyoung/repos/cle/saved/'
+data_path = '/data/lisa/data/mnist/mnist.pkl'
+save_path = '/u/chungjun/src/cle/saved/'
 
 batch_size = 128
 debug = 0
 
 model = Model()
-trdata = MNIST(name='train',
-               path=data_path)
-valdata = MNIST(name='valid',
-                path=data_path)
+train_data = MNIST(name='train',
+                   path=data_path)
 
-# Choose the random initialization method
-init_W = InitCell('randn')
-init_b = InitCell('zeros')
+valid_data = MNIST(name='valid',
+                   path=data_path)
 
 # Define nodes: objects
-model.inputs = trdata.theano_vars()
-x, y = model.inputs
+x, y = train_data.theano_vars()
+
 # You must use THEANO_FLAGS="compute_test_value=raise" python -m ipdb
 if debug:
     x.tag.test_value = np.zeros((batch_size, 784), dtype=np.float32)
     y.tag.test_value = np.zeros((batch_size, 1), dtype=np.float32)
 
-inputs = [x, y]
-inputs_dim = {'x':784, 'y':1}
-
-onehot = OnehotLayer(name='onehot',
-                     parent=['y'],
-                     nout=10)
+# Choose the random initialization method
+init_W = InitCell('randn')
+init_b = InitCell('zeros')
 
 h1 = FullyConnectedLayer(name='h1',
                          parent=['x'],
+                         parent_dim=[784],
                          nout=1000,
                          unit='relu',
                          init_W=init_W,
                          init_b=init_b)
 
-h2 = FullyConnectedLayer(name='h2',
-                         parent=['h1'],
-                         nout=10,
-                         unit='softmax',
-                         init_W=init_W,
-                         init_b=init_b)
+output = FullyConnectedLayer(name='output',
+                             parent=['h1'],
+                             parent_dim=[1000],
+                             nout=10,
+                             unit='softmax',
+                             init_W=init_W,
+                             init_b=init_b)
 
-cost = MulCrossEntropyLayer(name='cost', parent=['onehot', 'h2'])
+# You will fill in a list of nodes
+nodes = [h1, output]
 
-# You will fill in a list of nodes and fed them to the model constructor
-nodes = [onehot, h1, h2, cost]
+# Initalize the nodes
+params = OrderedDict()
+for node in nodes:
+    params.update(node.initialize())
+params = init_tparams(params)
 
-# Your model will build the Theano computational graph
-mlp = Net(inputs=inputs, inputs_dim=inputs_dim, nodes=nodes)
-mlp.build_graph()
+# Build the Theano computational graph
+h1_out = h1.fprop([x], params)
+y_hat = output.fprop([h1_out], params)
 
-# You can access any output of a node by doing model.nodes[$node_name].out
-cost = mlp.nodes['cost'].out
-err = error(predict(mlp.nodes['h2'].out), predict(mlp.nodes['onehot'].out))
-cost.name = 'cost'
+# Compute the cost
+cost = NllMulInd(y, y_hat).mean()
+err = error(predict(y_hat), y)
+cost.name = 'cross_entropy'
 err.name = 'error_rate'
-model.graphs = [mlp]
+
+model.inputs = [x, y]
+model.params = params
+model.nodes = nodes
 
 # Define your optimizer: Momentum (Nesterov), RMSProp, Adam
 optimizer = RMSProp(
-    lr=0.001
+    lr=0.01
 )
 
 extension = [
-    GradientClipping(),
-    EpochCount(40),
-    Monitoring(freq=100,
+    GradientClipping(batch_size=batch_size, check_nan=1),
+    EpochCount(500),
+    Monitoring(freq=1000,
                ddout=[cost, err],
-               data=[Iterator(trdata, batch_size),
-                     Iterator(valdata, batch_size)]),
-    Picklize(freq=200,
-             path=save_path)
+               data=[Iterator(train_data, batch_size),
+                     Iterator(valid_data, batch_size)]),
+    Picklize(freq=100000, path=save_path)
 ]
 
 mainloop = Training(
     name='toy_mnist',
-    data=Iterator(trdata, batch_size),
+    data=Iterator(train_data, batch_size),
     model=model,
     optimizer=optimizer,
     cost=cost,

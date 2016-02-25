@@ -1,11 +1,15 @@
 import ipdb
 import numpy as np
 import scipy
+import theano
 import theano.tensor as T
+
+from cle.cle.utils import sharedX, tolist, unpack
+from cle.cle.utils.gpu_op import softmax
+from cle.cle.utils.op import add_noise
 
 from theano.compat.python2x import OrderedDict
 from theano.sandbox.rng_mrg import MRG_RandomStreams
-from cle.cle.utils import sharedX, tolist, unpack
 
 
 class InitCell(object):
@@ -19,7 +23,7 @@ class InitCell(object):
     def __init__(self,
                  init_type='randn',
                  mean=0.,
-                 stddev=0.01,
+                 std_dev=0.01,
                  low=-0.08,
                  high=0.08,
                  **kwargs):
@@ -28,7 +32,7 @@ class InitCell(object):
         if init_type is not None:
             self.init_param = self.which_init(init_type)
         self.mean = mean
-        self.stddev = stddev
+        self.std_dev = std_dev
         self.low = low
         self.high = high
 
@@ -39,23 +43,35 @@ class InitCell(object):
         return np.random.uniform(self.low, self.high, shape)
 
     def randn(self, shape):
-        return np.random.normal(self.mean, self.stddev, shape)
+        return np.random.normal(self.mean, self.std_dev, shape)
 
     def zeros(self, shape):
         return np.zeros(shape)
+
+    def ones(self, shape):
+        return np.ones(shape)
 
     def const(self, shape):
         return np.zeros(shape) + self.mean
 
     def ortho(self, shape):
-        x = np.random.normal(self.mean, self.stddev, shape)
+        x = np.random.normal(self.mean, self.std_dev, shape)
         return scipy.linalg.orth(x)
 
-    def get(self, shape, name=None):
+
+    def relu(self,shape):
+        x = np.random.normal(self.mean, self.std_dev , shape) * np.sqrt(2.0/np.sum(shape))
+        return x
+
+    def getX(self, shape, name=None):
         return sharedX(self.init_param(shape), name)
 
     def setX(self, x, name=None):
         return sharedX(x, name)
+
+    def get(self, shape, name = None):
+        #return self.init_param(shape)
+        return self.getX(shape, name)
 
     def __getstate__(self):
         dic = self.__dict__.copy()
@@ -70,7 +86,8 @@ class InitCell(object):
 
 
 class RandomCell(object):
-    seed_rng = np.random.RandomState((2015, 3, 24))
+    #seed_rng = np.random.RandomState((2015, 3, 24))
+    seed_rng = np.random.RandomState(np.random.randint(1024))
     """
     WRITEME
 
@@ -129,13 +146,16 @@ class NonlinCell(RandomCell):
         return z
 
     def relu(self, z):
-        return z * (z > 0.)
+        return z * (z > 0)
 
     def sigmoid(self, z):
         return T.nnet.sigmoid(z)
 
     def softmax(self, z):
         return T.nnet.softmax(z)
+
+    def gpu_softmax(self, z):
+        return softmax(z)
 
     def softplus(self, z):
         return T.nnet.softplus(z)
@@ -186,25 +206,32 @@ class StemCell(NonlinCell):
     .. todo::
     """
     def __init__(self,
+                 name,
                  parent=[],
                  parent_dim=[],
                  nout=None,
                  init_W=InitCell('randn'),
                  init_b=InitCell('zeros'),
                  cons=0.,
-                 name=None,
-                 lr_scaler=None,
+                 use_bias=1,
+                 lr_scaler=1.,
+                 x_as_index=0,
                  **kwargs):
+
         super(StemCell, self).__init__(**kwargs)
+
         if name is None:
             name = self.__class__.name__.lower()
+
         self.name = name
         self.nout = nout
         self.init_W = init_W
         self.init_b = init_b
         self.cons = cons
+        self.x_as_index = x_as_index
         self.parent = OrderedDict()
         parent_dim = tolist(parent_dim)
+
         for i, par in enumerate(tolist(parent)):
             if len(parent_dim) != 0 and len(parent) != 0:
                 if len(parent) != len(parent_dim):
@@ -214,26 +241,33 @@ class StemCell(NonlinCell):
                 self.parent[par] = parent_dim[i]
             else:
                 self.parent[par] = None
-        self.params = OrderedDict()
         self.lr_scaler = lr_scaler
+        self.params = OrderedDict()
+        self.use_bias = use_bias
 
-    def get_params(self):
-        return self.params
-
-    def fprop(self, x=None):
+    def fprop(self):
         raise NotImplementedError(
             str(type(self)) + " does not implement Layer.fprop.")
+
 
     def alloc(self, x):
         self.params[x.name] = x
 
     def initialize(self):
+
         for parname, parout in self.parent.items():
             W_shape = (parout, self.nout)
-            W_name = 'W_'+parname+'__'+self.name
-            self.alloc(self.init_W.get(W_shape, W_name))
-        self.alloc(self.init_b.get(self.nout, 'b_'+self.name))
+            W_name = 'W_' + parname + '__' + self.name
+            self.alloc(self.init_W.get(W_shape,W_name))
 
+        if self.use_bias:
+            b_name = 'b_' + self.name
+            self.alloc(self.init_b.get(self.nout, b_name))
+
+        return self.params
+
+    def get_params(self):
+        return self.params
 
 class OnehotLayer(StemCell):
     """
@@ -244,6 +278,7 @@ class OnehotLayer(StemCell):
     .. todo::
     """
     def fprop(self, x):
+
         x = unpack(x)
         x = T.cast(x, 'int32')
         z = T.zeros((x.shape[0], self.nout))
@@ -251,55 +286,7 @@ class OnehotLayer(StemCell):
             z[T.arange(x.size) % x.shape[0], x.T.flatten()], 1
         )
         z.name = self.name
-        return z
 
-    def initialize(self):
-        pass
-
-
-class ProjectionLayer(StemCell):
-    """
-    Transform a scalar to one-hot vector
-
-    Parameters
-    ----------
-    .. todo::
-    """
-    def fprop(self, x):
-        x = unpack(x)
-        z = T.zeros((x.shape[0], self.nout))
-        for x, (parname, parout) in izip(X, self.parent.items()):
-            W = self.params['W_'+parname+'__'+self.name]
-            z += T.dot(x[:, :parout], W)
-        z.name = self.name
-        return z
-
-    def initialize(self):
-        for parname, parout in self.parent.items():
-            W_shape = (parout, self.nout)
-            W_name = 'W_'+parname+'__'+self.name
-            self.alloc(self.init_W.get(W_shape, W_name))
-
-
-class ConcLayer(StemCell):
-    """
-    Concatenate two tensor varaibles
-
-    Parameters
-    ----------
-    .. todo::
-    """
-    def __init__(self,
-                 axis=-1,
-                 **kwargs):
-        super(ConcLayer, self).__init__(**kwargs)
-        self.axis = axis
-
-    def fprop(self, X):
-        x = X[0]
-        y = X[1]
-        z = T.concatenate([x[:, y.shape[-1]:], y], axis=self.axis)
-        z.name = self.name
         return z
 
     def initialize(self):
@@ -308,21 +295,27 @@ class ConcLayer(StemCell):
 
 class RealVectorLayer(StemCell):
     """
-    Concatenate two tensor varaibles
+    Continuous vector
 
     Parameters
     ----------
     .. todo::
     """
-    def fprop(self, X=None):
-        z = self.params['b_'+self.name]
-        if z.ndim == 1:
-            z = z.dimshuffle('x', 0)
+    def fprop(self, tparams):
+
+        z = tparams['b_'+self.name]
         z = self.nonlin(z) + self.cons
+
+        if self.nout == 1:
+            z = T.addbroadcast(z, 1)
+
         z.name = self.name
+
         return z
 
     def initialize(self):
-        b_name = 'b_' + self.name
-        self.alloc(self.init_b.get(self.nout, b_name))
-        self.out = self.params[b_name]
+
+        params = OrderedDict()
+        params['b_'+self.name] = self.init_b.get(self.nout)
+
+        return params
