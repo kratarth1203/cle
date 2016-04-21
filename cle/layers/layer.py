@@ -452,3 +452,169 @@ class BatchNormLSTM(RecurrentLayer):
         params['gamma_'+self.name] = InitCell('ones').get(4*N , 'gamam_' + self.name)
 
         return params
+
+
+
+class BatchNormLSTM2(RecurrentLayer):
+    """
+    Batch normalization long short-term memory
+
+    Parameters
+    ----------
+    .. todo::
+    """
+
+    def __init__(self, rho=0.5, eps=1e-6, T_max= 1,**kwargs):
+        super(BatchNormLSTM2, self).__init__(**kwargs)
+        self.rho = rho
+        self.eps = eps
+        self.T_max = T_max
+        self.mu = InitCell('zeros').get((self.T_max,4*self.nout), name = 'mu_' + self.name)
+        self.sigma = InitCell('ones').get((self.T_max,4*self.nout), name = 'sigma_'+self.name)
+
+        self.h_mu = InitCell('zeros').get((self.T_max,4*self.nout), name = 'h_mu_' + self.name)
+        self.h_sigma = InitCell('ones').get((self.T_max, 4*self.nout), name = 'h_sigma_'+self.name)
+
+    def get_init_state(self, batch_size):
+
+        state = T.zeros((batch_size, 2*self.nout), dtype=theano.config.floatX)
+        state = T.unbroadcast(state, *range(state.ndim))
+
+        return state
+
+    def fprop(self, XH, tparams = None, time_step=1, mask=None, z_mu=None, z_var=None, test=0, running_average = 1):
+
+        # XH is a list of inputs: [state_belows, state_befores]
+        # each state vector is: [state_before; cell_before]
+        # Hence, you use h[:, :self.nout] to compute recurrent term
+        X, H = XH
+
+        if len(X) != len(self.parent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of parents.")
+
+        if len(H) != len(self.recurrent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of recurrents.")
+
+        # The index of self recurrence is 0
+        z_t = H[0]
+        z = T.zeros((X[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+        z_h = T.zeros((H[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+
+        for x, (parname, parout) in izip(X, self.parent.items()):
+            W = self.params['W_'+parname+'__'+self.name]
+
+            if x.ndim == 1:
+                if 'int' not in x.dtype:
+                    x = T.cast(x, 'int64')
+                z += W[x]
+            else:
+                z += T.dot(x[:, :parout], W)
+
+        for h, (recname, recout) in izip(H, self.recurrent.items()):
+            U = self.params['U_'+recname+'__'+self.name]
+            z_h += T.dot(h[:, :recout], U)
+
+        if not test:
+            z_true = T.cast(T.neq(z.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
+            z_mu = z.sum(axis=0) / z_true
+            z_sigma = T.sqrt(((z - z_mu[None, :])**2).sum(axis=0) / z_true)
+            z_h_true = T.cast(T.neq(z_h.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
+            z_h_mu = z.sum(axis=0) / z_h_true
+            z_h_sigma = T.sqrt(((z_h - z_h_mu[None, :])**2).sum(axis=0) / z_true)
+
+            if running_average:
+                running_mu = theano.clone(self.mu[time_step,:], share_inputs=False)
+                running_mu.default_update = (self.rho * self.mu[time_step,:] + (1 - self.rho) * z_mu)
+                running_sigma = theano.clone(self.sigma[time_step,:], share_inputs=False)
+                running_sigma.default_update = (self.rho * self.sigma[time_step,:] + (1 - self.rho) * z_sigma)
+
+                z_mu += 0 * running_mu
+                z_sigma += 0 * running_sigma
+
+                running_h_mu = theano.clone(self.h_mu[time_step,:], share_inputs=False)
+                running_h_mu.default_update = (self.rho * self.h_mu[time_step,:] + (1 - self.rho) * z_h_mu)
+                running_h_sigma = theano.clone(self.h_sigma[time_step,:], share_inputs=False)
+                running_sigma.default_update = (self.rho * self.h_sigma[time_step,:] + (1 - self.rho) * z_h_sigma)
+
+                z_h_mu += 0 * running_h_mu
+                z_h_sigma += 0 * running_h_sigma
+
+            else:
+                mu = theano.clone(self.mu[time_step,:], share_inputs=False)
+                mu.default_update = z_mu
+                sigma = theano.clone(self.sigma[time_step,:], share_inputs=False)
+                sigma.default_update = z_sigma
+
+                z_mu += 0 * mu
+                z_sigma += 0 * sigma
+
+
+                h_mu = theano.clone(self.h_mu[time_step,:], share_inputs=False)
+                h_mu.default_update = z_h_mu
+                h_sigma = theano.clone(self.h_sigma[time_step,:], share_inputs=False)
+                h_sigma.default_update = z_h_sigma
+
+                z_h_mu += 0 * h_mu
+                z_h_sigma += 0 * h_sigma
+        else:
+            z_mu = self.mu[time_step,:]
+            z_sigma = self.sigma[time_step,:]
+
+            z_h_mu = self.h_mu[time_step,:]
+            z_h_sigma = self.h_sigma[time_step,:]
+
+        z_sigma += self.eps
+        z = (z - z_mu[None, :]) * (self.params['gamma_'+self.name] / z_sigma)[None, :] + self.params['beta_'+self.name][None, :]
+        z_h = (z_h - z_h_mu[None, :]) * (self.params['h_gamma_'+self.name] / z_h_sigma)[None, :] + self.params['h_beta_'+self.name][None, :]
+
+        _z = z + z_h
+        _z += self.params['b_'+self.name]
+        # Compute activations of gating units
+        i_on = T.nnet.sigmoid(_z[:, self.nout:2*self.nout])
+        f_on = T.nnet.sigmoid(_z[:, 2*self.nout:3*self.nout])
+        o_on = T.nnet.sigmoid(_z[:, 3*self.nout:])
+
+        # Update hidden & cell states
+        z_t = T.set_subtensor(
+            z_t[:, self.nout:],
+            f_on * z_t[:, self.nout:] +
+            i_on * self.nonlin(z[:, :self.nout])
+        )
+
+        z_t = T.set_subtensor(
+            z_t[:, :self.nout],
+            o_on * self.nonlin(z_t[:, self.nout:])
+        )
+
+        z_t.name = self.name
+
+        return z_t#, z_mu_t, z_var_t, z_h_mu_t, z_h_sigma_t
+
+    def initialize(self):
+
+        N = self.nout
+
+        for parname, parout in self.parent.items():
+            W_shape = (parout, 4*N)
+            W_name = 'W_' + parname + '__' + self.name
+            self.alloc(self.init_W.get(W_shape, W_name))
+
+        for recname, recout in self.recurrent.items():
+            M = recout
+            U = self.init_U.ortho((M, N))
+
+            for j in xrange(3):
+                U = np.concatenate([U, self.init_U.ortho((M, N))], axis=-1)
+            U_name = 'U_'+recname+'__'+self.name
+            U = self.init_U.setX(U, U_name)
+            self.alloc(U)
+
+        self.alloc(self.init_b.get(4*N, 'b_' + self.name))
+        self.alloc(InitCell('zeros').get(4*N, 'beta_' + self.name))
+        self.alloc(InitCell('ones').get(4*N , 'gamma_' + self.name))
+        self.alloc(InitCell('zeros').get(4*N, 'h_beta_' + self.name))
+        self.alloc(InitCell('ones').get(4*N , 'h_gamma_' + self.name))
+
+        return self.params

@@ -24,6 +24,8 @@ class RecurrentLayer(StemCell):
                  recurrent=[],
                  recurrent_dim=[],
                  self_recurrent=1,
+                 clip_gradient = True,
+                 clip_bound = 5,
                  init_U=InitCell('ortho'),
                  **kwargs):
 
@@ -41,6 +43,8 @@ class RecurrentLayer(StemCell):
             else:
                 self.recurrent[rec] = None
 
+        self.clip_gradient = clip_gradient
+        self.clip_bound = clip_bound
         self.init_U = init_U
 
     def get_init_state(self, batch_size):
@@ -84,6 +88,8 @@ class SimpleRecurrent(RecurrentLayer):
                                  "with the number of recurrents.")
 
         z = T.zeros((X[0].shape[0], self.nout), dtype=theano.config.floatX)
+        if self.clip_gradient:
+            z = theano.gradient.grad_clip(z,-self.clip_bound,self.clip_bound)        
 
         for x, (parname, parout) in izip(X, self.parent.items()):
             W = self.params['W_'+parname+'__'+self.name]
@@ -114,6 +120,11 @@ class LSTM(RecurrentLayer):
     ----------
     .. todo::
     """
+    def __init__(self,
+                 **kwargs):
+
+        super(LSTM, self).__init__(**kwargs)
+
     def get_init_state(self, batch_size):
 
         state = T.zeros((batch_size, 2*self.nout), dtype=theano.config.floatX)
@@ -139,7 +150,11 @@ class LSTM(RecurrentLayer):
         # The index of self recurrence is 0
         z_t = H[0]
         z = T.zeros((X[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
-
+        '''
+        if self.clip_gradient:
+            z_t = theano.gradient.grad_clip(z_t,-self.clip_bound,self.clip_bound)        
+            z = theano.gradient.grad_clip(z,-self.clip_bound,self.clip_bound)        
+        '''
         for x, (parname, parout) in izip(X, self.parent.items()):
             W = self.params['W_'+parname+'__'+self.name]
 
