@@ -341,6 +341,13 @@ class BatchNormLSTM(RecurrentLayer):
     ----------
     .. todo::
     """
+    def __init__(self, rho=0.5, eps=1e-6,**kwargs):
+        super(BatchNormLSTM, self).__init__(**kwargs)
+        self.rho = rho
+        self.eps = eps
+        self.mu = InitCell('zeros').get(4*self.nout, name = 'mu_' + self.name)
+        self.sigma = InitCell('ones').get(4*self.nout, name = 'sigma_'+self.name)
+
     def get_init_state(self, batch_size):
 
         state = T.zeros((batch_size, 2*self.nout), dtype=theano.config.floatX)
@@ -348,7 +355,7 @@ class BatchNormLSTM(RecurrentLayer):
 
         return state
 
-    def fprop(self, XH, tparams, time_step=1, mask=None, z_mu=None, z_var=None, test=0):
+    def fprop(self, XH, tparams = None, time_step=1, mask=None, z_mu=None, z_var=None, test=0):
 
         # XH is a list of inputs: [state_belows, state_befores]
         # each state vector is: [state_before; cell_before]
@@ -368,7 +375,7 @@ class BatchNormLSTM(RecurrentLayer):
         z = T.zeros((X[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
 
         for x, (parname, parout) in izip(X, self.parent.items()):
-            W = tparams['W_'+parname+'__'+self.name]
+            W = self.params['W_'+parname+'__'+self.name]
 
             if x.ndim == 1:
                 if 'int' not in x.dtype:
@@ -378,10 +385,10 @@ class BatchNormLSTM(RecurrentLayer):
                 z += T.dot(x[:, :parout], W)
 
         for h, (recname, recout) in izip(H, self.recurrent.items()):
-            U = tparams['U_'+recname+'__'+self.name]
+            U = self.params['U_'+recname+'__'+self.name]
             z += T.dot(h[:, :recout], U)
 
-        z += tparams['b_'+self.name]
+        z += self.params['b_'+self.name]
 
         if test:
             z_mu_t = z_mu
@@ -395,17 +402,35 @@ class BatchNormLSTM(RecurrentLayer):
 
             #z_mu_t = z_mu + (((z - z_mu[None, :]) / T.cast(time_step, dtype=theano.config.floatX)) * mask[:, None]).sum(axis=0) / mask.sum()
             #z_var_t = z_var + ((z - z_mu[None, :]) * (z - z_mu_t[None, :]) * mask[:, None]).sum(axis=0) / mask.sum()
-            z_mu_t = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
-                                (z * mask[:, None]).sum(axis=0) / mask.sum(),
-                                z_mu + (((z - z_mu[None, :]) / T.cast(time_step, dtype=theano.config.floatX)) * mask[:, None]).sum(axis=0) / mask.sum())
-            z_var_t = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
-                               z_var,
-                               z_var + ((z - z_mu[None, :]) * (z - z_mu_t[None, :]) * mask[:, None]).sum(axis=0) / mask.sum())
+            #***********
+            #z_mu_t = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
+            #                    (z * mask[:, None]).sum(axis=0) / mask.sum(),
+            #                    z_mu + (((z - z_mu[None, :]) / T.cast(time_step, dtype=theano.config.floatX)) * mask[:, None]).sum(axis=0) / mask.sum())
+            #z_var_t = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
+            #                   z_var,
+            #                   z_var + ((z - z_mu[None, :]) * (z - z_mu_t[None, :]) * mask[:, None]).sum(axis=0) / mask.sum())
 
-        z = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
-                     z - z_mu_t[None, :],
-                     (z - z_mu_t[None, :]) / (T.sqrt(z_var_t)[None, :] + 1e-6))
-        z = tparams['gamma_'+self.name][None, :] * z + tparams['beta_'+self.name][None, :]
+
+            z_mu = T.mean(z,axis=0)
+            z_sigma = T.sqrt(((z - z_mu[None, :])**2).sum(axis=0))
+            '''
+            if True:
+                running_mu = theano.clone(self.mu, share_inputs=False)
+                running_mu.default_update = (self.rho * self.mu + (1 - self.rho) * z_mu)
+                running_sigma = theano.clone(self.sigma, share_inputs=False)
+                running_sigma.default_update = (self.rho * self.sigma + (1 - self.rho) * z_sigma)
+
+                z_mu += 0 * running_mu
+                z_sigma += 0 * running_sigma
+            '''
+        z_sigma += self.eps
+        z += self.params['b_'+self.name]
+        z = (z - z_mu[None, :]) * (self.params['gamma_'+self.name] / z_sigma)[None, :] + self.params['beta_'+self.name][None, :]
+ 
+        #z = T.switch(T.cast(T.eq(time_step, 1), 'int32'),
+        #             z - z_mu_t[None, :],
+        #             (z - z_mu_t[None, :]) / (T.sqrt(z_var_t)[None, :] + 1e-6))
+        #z = tparams['gamma_'+self.name][None, :] * z + tparams['beta_'+self.name][None, :]
 
         # Compute activations of gating units
         i_on = T.nnet.sigmoid(z[:, self.nout:2*self.nout])
@@ -426,17 +451,16 @@ class BatchNormLSTM(RecurrentLayer):
 
         z_t.name = self.name
 
-        return z_t, z_mu_t, z_var_t
+        return z_t#, z_mu_t, z_var_t
 
     def initialize(self):
 
-        params = OrderedDict()
         N = self.nout
 
         for parname, parout in self.parent.items():
             W_shape = (parout, 4*N)
             W_name = 'W_' + parname + '__' + self.name
-            params[W_name] = self.init_W.get(W_shape, W_name)
+            self.alloc(self.init_W.get(W_shape, W_name))
 
         for recname, recout in self.recurrent.items():
             M = recout
@@ -445,13 +469,14 @@ class BatchNormLSTM(RecurrentLayer):
             for j in xrange(3):
                 U = np.concatenate([U, self.init_U.ortho((M, N))], axis=-1)
             U_name = 'U_'+recname+'__'+self.name
-            params[U_name] = U
+	    U = self.init_U.setX(U, U_name)
+            self.alloc(U)
 
-        params['b_'+self.name] = self.init_b.get(4*N, 'b_' + self.name)
-        params['beta_'+self.name] = InitCell('zeros').get(4*N, 'beta_' + self.name)
-        params['gamma_'+self.name] = InitCell('ones').get(4*N , 'gamam_' + self.name)
+        self.alloc(self.init_b.get(4*N, 'b_' + self.name))
+        self.alloc(InitCell('zeros').get(4*N, 'beta_' + self.name))
+        self.alloc(InitCell('ones').get(4*N , 'gamma_' + self.name))
 
-        return params
+        return self.params
 
 
 
@@ -470,10 +495,10 @@ class BatchNormLSTM2(RecurrentLayer):
         self.eps = eps
         self.T_max = T_max
         self.mu = InitCell('zeros').get((self.T_max,4*self.nout), name = 'mu_' + self.name)
-        self.sigma = InitCell('ones').get((self.T_max,4*self.nout), name = 'sigma_'+self.name)
+        self.sigma = InitCell('ones').get((self.T_max, 4*self.nout), name = 'sigma_'+self.name)
 
-        self.h_mu = InitCell('zeros').get((self.T_max,4*self.nout), name = 'h_mu_' + self.name)
-        self.h_sigma = InitCell('ones').get((self.T_max, 4*self.nout), name = 'h_sigma_'+self.name)
+        self.h_mu = InitCell('zeros').get((self.T_max, 4*self.nout), name = 'h_mu_' + self.name)
+        self.h_sigma = InitCell('ones').get( (self.T_max,4*self.nout), name = 'h_sigma_'+self.name)
 
     def get_init_state(self, batch_size):
 
@@ -516,15 +541,17 @@ class BatchNormLSTM2(RecurrentLayer):
             U = self.params['U_'+recname+'__'+self.name]
             z_h += T.dot(h[:, :recout], U)
 
+
         if not test:
-            z_true = T.cast(T.neq(z.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
-            z_mu = z.sum(axis=0) / z_true
-            z_sigma = T.sqrt(((z - z_mu[None, :])**2).sum(axis=0) / z_true)
-            z_h_true = T.cast(T.neq(z_h.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
-            z_h_mu = z.sum(axis=0) / z_h_true
-            z_h_sigma = T.sqrt(((z_h - z_h_mu[None, :])**2).sum(axis=0) / z_true)
+            #z_true = T.cast(T.neq(z.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
+            z_mu = T.mean(z,axis=0)
+            z_sigma = T.sqrt(((z - z_mu[None, :])**2).sum(axis=0))
+            #z_h_true = T.cast(T.neq(z_h.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
+            z_h_mu = T.mean(z_h,axis=0)
+            z_h_sigma = T.sqrt(((z_h - z_h_mu[None, :])**2).sum(axis=0))
 
             if running_average:
+                '''
                 running_mu = theano.clone(self.mu[time_step,:], share_inputs=False)
                 running_mu.default_update = (self.rho * self.mu[time_step,:] + (1 - self.rho) * z_mu)
                 running_sigma = theano.clone(self.sigma[time_step,:], share_inputs=False)
@@ -536,10 +563,23 @@ class BatchNormLSTM2(RecurrentLayer):
                 running_h_mu = theano.clone(self.h_mu[time_step,:], share_inputs=False)
                 running_h_mu.default_update = (self.rho * self.h_mu[time_step,:] + (1 - self.rho) * z_h_mu)
                 running_h_sigma = theano.clone(self.h_sigma[time_step,:], share_inputs=False)
-                running_sigma.default_update = (self.rho * self.h_sigma[time_step,:] + (1 - self.rho) * z_h_sigma)
+                running_h_sigma.default_update = (self.rho * self.h_sigma[time_step,:] + (1 - self.rho) * z_h_sigma)
 
                 z_h_mu += 0 * running_h_mu
                 z_h_sigma += 0 * running_h_sigma
+                '''
+                running_mu = ((self.rho * self.mu[time_step,:]) + ((1 - self.rho) * z_mu) )
+                T.set_subtensor(self.mu[time_step,:] , running_mu)
+
+                running_sigma = ((self.rho * self.sigma[time_step,:]) + ((1 - self.rho) * z_sigma) )
+                T.set_subtensor(self.sigma[time_step,:] , running_sigma)
+
+
+                running_h_mu = ((self.rho * self.h_mu[time_step,:]) + ((1 - self.rho) * z_h_mu) )
+                T.set_subtensor(self.h_mu[time_step,:] , running_h_mu)
+
+                running_h_sigma = ((self.rho * self.h_sigma[time_step,:]) + ((1 - self.rho) * z_h_sigma) )
+                T.set_subtensor(self.h_sigma[time_step,:] , running_h_sigma)
 
             else:
                 mu = theano.clone(self.mu[time_step,:], share_inputs=False)
@@ -566,8 +606,9 @@ class BatchNormLSTM2(RecurrentLayer):
             z_h_sigma = self.h_sigma[time_step,:]
 
         z_sigma += self.eps
-        z = (z - z_mu[None, :]) * (self.params['gamma_'+self.name] / z_sigma)[None, :] + self.params['beta_'+self.name][None, :]
-        z_h = (z_h - z_h_mu[None, :]) * (self.params['h_gamma_'+self.name] / z_h_sigma)[None, :] + self.params['h_beta_'+self.name][None, :]
+        z_h_sigma += self.eps
+        z = (z - z_mu[None, :]) * (self.params['gamma_'+self.name] )#/ z_sigma)[None, :]# + self.params['beta_'+self.name][None, :]
+        z_h = (z_h - z_h_mu[None, :]) * (self.params['h_gamma_'+self.name] )#/ z_h_sigma)[None, :]# + self.params['h_beta_'+self.name][None, :]
 
         _z = z + z_h
         _z += self.params['b_'+self.name]
@@ -580,7 +621,7 @@ class BatchNormLSTM2(RecurrentLayer):
         z_t = T.set_subtensor(
             z_t[:, self.nout:],
             f_on * z_t[:, self.nout:] +
-            i_on * self.nonlin(z[:, :self.nout])
+            i_on * self.nonlin(_z[:, :self.nout])
         )
 
         z_t = T.set_subtensor(
@@ -612,9 +653,265 @@ class BatchNormLSTM2(RecurrentLayer):
             self.alloc(U)
 
         self.alloc(self.init_b.get(4*N, 'b_' + self.name))
-        self.alloc(InitCell('zeros').get(4*N, 'beta_' + self.name))
+        #self.alloc(InitCell('zeros').get(4*N, 'beta_' + self.name))
         self.alloc(InitCell('ones').get(4*N , 'gamma_' + self.name))
-        self.alloc(InitCell('zeros').get(4*N, 'h_beta_' + self.name))
+        #self.alloc(InitCell('zeros').get(4*N, 'h_beta_' + self.name))
         self.alloc(InitCell('ones').get(4*N , 'h_gamma_' + self.name))
 
         return self.params
+
+
+class BatchNormLSTM3(RecurrentLayer):
+    """
+    Batch normalization long short-term memory
+
+    Parameters
+    ----------
+    .. todo::
+    """
+
+    def __init__(self, rho=0.5, eps=1e-6,**kwargs):
+        super(BatchNormLSTM3, self).__init__(**kwargs)
+        self.rho = rho
+        self.eps = eps
+
+    def get_init_state(self, batch_size):
+
+        state = T.zeros((batch_size, 2*self.nout), dtype=theano.config.floatX)
+        state = T.unbroadcast(state, *range(state.ndim))
+
+        return state
+
+    def fprop(self, XH, tparams = None, time_step = 0, mask=None, z_mu=None, z_var=None):
+
+        # XH is a list of inputs: [state_belows, state_befores]
+        # each state vector is: [state_before; cell_before]
+        # Hence, you use h[:, :self.nout] to compute recurrent term
+        X, H = XH
+
+        if len(X) != len(self.parent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of parents.")
+
+        if len(H) != len(self.recurrent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of recurrents.")
+
+        # The index of self recurrence is 0
+        z_t = H[0]
+        z = T.zeros((X[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+        z_h = T.zeros((H[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+
+        for x, (parname, parout) in izip(X, self.parent.items()):
+            W = self.params['W_'+parname+'__'+self.name]
+
+            if x.ndim == 1:
+                if 'int' not in x.dtype:
+                    x = T.cast(x, 'int64')
+                z += W[x]
+            else:
+                z += T.dot(x[:, :parout], W)
+
+        for h, (recname, recout) in izip(H, self.recurrent.items()):
+            U = self.params['U_'+recname+'__'+self.name]
+            z_h += T.dot(h[:, :recout], U)
+
+        z_true = T.cast(T.neq(z.sum(axis=1), 0.0).sum(), dtype=theano.config.floatX)
+        z_mu = z.sum(axis=0) / z_true
+        z_sigma = T.sqrt(((z - z_mu[None, :])**2).sum(axis=0) / z_true)
+        z_sigma += self.eps
+
+        z_h_mu = T.mean(z_h, axis=0)
+        z_h_sigma = T.sqrt(((z_h - z_h_mu[None, :])**2).sum(axis=0))
+        z_h_sigma += self.eps
+
+        z = (z - z_mu[None, :]) * (self.params['gamma_'+self.name] / z_sigma)[None, :] #+ self.params['beta_'+self.name][None, :]
+        z_h = (z_h - z_h_mu[None, :]) * (self.params['h_gamma_'+self.name] / z_h_sigma)[None, :]# + self.params['h_beta_'+self.name][None, :]
+
+        _z = z + z_h 
+        _z += self.params['b_'+self.name]
+        # Compute activations of gating units
+        i_on = T.nnet.sigmoid(_z[:, self.nout:2*self.nout])
+        f_on = T.nnet.sigmoid(_z[:, 2*self.nout:3*self.nout])
+        o_on = T.nnet.sigmoid(_z[:, 3*self.nout:])
+
+        # Update hidden & cell states
+        z_t = T.set_subtensor(
+            z_t[:, self.nout:],
+            f_on * z_t[:, self.nout:] +
+            i_on * self.nonlin(_z[:, :self.nout])
+        )
+
+       
+        c_t_mu = T.mean(z_t[:,self.nout:], axis=0)
+        c_t_sigma = T.sqrt(((z_t[:,self.nout:] - c_t_mu[None, :])**2).sum(axis=0))
+        c_t_sigma += self.eps
+         
+        c_t = (z_t[:,self.nout:] - c_t_mu[None,:])* (self.params['c_gamma_'+self.name] / c_t_sigma)[None,:] + self.params['c_beta_' +self.name][None,:]
+
+        z_t = T.set_subtensor(
+            z_t[:, :self.nout],
+            o_on * self.nonlin(c_t)
+        )
+
+        z_t.name = self.name
+
+        return z_t 
+
+    def initialize(self):
+
+        N = self.nout
+
+        for parname, parout in self.parent.items():
+            W_shape = (parout, 4*N)
+            W_name = 'W_' + parname + '__' + self.name
+            self.alloc(self.init_W.get(W_shape, W_name))
+
+        for recname, recout in self.recurrent.items():
+            M = recout
+            U = self.init_U.ortho((M, N))
+
+            for j in xrange(3):
+                U = np.concatenate([U, self.init_U.ortho((M, N))], axis=-1)
+            U_name = 'U_'+recname+'__'+self.name
+            U = self.init_U.setX(U, U_name)
+            self.alloc(U)
+
+        self.alloc(self.init_b.get(4*N, 'b_' + self.name))
+        #self.alloc(InitCell('zeros').get(4*N, 'beta_' + self.name))
+        self.alloc(InitCell('ones').get(4*N , 'gamma_' + self.name))
+        #self.alloc(InitCell('zeros').get(4*N, 'h_beta_' + self.name))
+        self.alloc(InitCell('ones').get(4*N , 'h_gamma_' + self.name))
+        self.alloc(InitCell('zeros').get(N, 'c_beta_' + self.name))
+        self.alloc(InitCell('ones').get(N , 'c_gamma_' + self.name))
+
+        return self.params
+
+
+class BatchNormLSTM4(RecurrentLayer):
+    """
+    Long short-term memory
+
+    Parameters
+    ----------
+    .. todo::
+    """
+    def __init__(self,
+                 **kwargs):
+        super(BatchNormLSTM4, self).__init__(**kwargs)
+        self.bn_input_hidden = BatchNormLayer(name = 'bn_input_hidden' + self.name, 
+                               parent = ['x'],
+                               parent_dim = [self.nout],
+                               nout = self.nout,
+                               unit = 'linear',
+                               init_W = self.init_W,
+                               init_b = self.init_b)
+        self.bn_hidden_hidden = BatchNormLayer(name = 'bn_hidden_hidden' + self.name, 
+                               parent = ['h'],
+                               parent_dim = [self.nout],
+                               nout = self.nout,
+                               unit = 'linear',
+                               init_W = self.init_W,
+                               init_b = self.init_b)
+
+    def get_init_state(self, batch_size):
+
+        state = T.zeros((batch_size, 2*self.nout), dtype=theano.config.floatX)
+        state = T.unbroadcast(state, *range(state.ndim))
+
+        return state
+
+    def fprop(self, XH, tparams = None):
+
+        # XH is a list of inputs: [state_belows, state_befores]
+        # each state vector is: [state_before; cell_before]
+        # Hence, you use h[:, :self.nout] to compute recurrent term
+        X, H = XH
+
+        if len(X) != len(self.parent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of parents.")
+
+        if len(H) != len(self.recurrent):
+            raise AttributeError("The number of inputs doesn't match "
+                                 "with the number of recurrents.")
+
+        # The index of self recurrence is 0
+        z_t = H[0]
+        z = T.zeros((X[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+        z_h = T.zeros((H[0].shape[0], 4*self.nout), dtype=theano.config.floatX)
+        '''
+        if self.clip_gradient:
+            z_t = theano.gradient.grad_clip(z_t,-self.clip_bound,self.clip_bound)        
+            z = theano.gradient.grad_clip(z,-self.clip_bound,self.clip_bound)        
+        '''
+        for x, (parname, parout) in izip(X, self.parent.items()):
+            W = self.params['W_'+parname+'__'+self.name]
+
+            if x.ndim == 1:
+                if 'int' not in x.dtype:
+                    x = T.cast(x, 'int64')
+                z += W[x]
+            else:
+                z += T.dot(x[:, :parout], W)
+
+        for h, (recname, recout) in izip(H, self.recurrent.items()):
+            U = self.params['U_'+recname+'__'+self.name]
+            z_h += T.dot(h[:, :recout].astype('float32'), U.astype('float32'))
+
+        z = self.bn_input_hidden.fprop([z])
+        z_h = self.bn_hidden_hidden.fprop([z_h])
+        z = z + z_h
+        z += self.params['b_'+self.name]
+
+        # Compute activations of gating units
+        i_t = T.nnet.sigmoid(z[:, self.nout:2*self.nout])
+        f_t = T.nnet.sigmoid(z[:, 2*self.nout:3*self.nout])
+        o_t = T.nnet.sigmoid(z[:, 3*self.nout:])
+
+        # Update hidden & cell states
+        z_t = T.set_subtensor(
+            z_t[:, self.nout:],
+            f_t * z_t[:, self.nout:] +
+            i_t * self.nonlin(z[:, :self.nout])
+        )
+
+        z_t = T.set_subtensor(
+            z_t[:, :self.nout],
+            o_t * self.nonlin(z_t[:, self.nout:])
+        )
+
+        z_t.name = self.name
+
+        return z_t
+
+    def initialize(self):
+
+        N = self.nout
+        self.bn_input_hidden_params = self.bn_input_hidden.initialize()
+        self.bn_hidden_hidden_params = self.bn_hidden_hidden.initialize()
+        
+        for parname, parout in self.parent.items():
+            W_shape = (parout, 4*N)
+            W_name = 'W_' + parname + '__' + self.name
+            self.alloc(self.init_W.get(W_shape, W_name))
+
+        for recname, recout in self.recurrent.items():
+            M = recout
+            U = self.init_U.ortho((M, N))
+
+            for j in xrange(3):
+                U = np.concatenate([U, self.init_U.ortho((M, N))], axis=-1)
+
+            U_name = 'U_'+recname+'__'+self.name
+            U = self.init_U.setX(U, U_name)
+            self.alloc(U)
+
+        self.alloc(self.init_b.get(4*N, 'b_' + self.name))
+
+        all_params = self.params
+        all_params.update(self.bn_input_hidden_params)
+        all_params.update(self.bn_hidden_hidden_params)
+        return all_params 
+
+
